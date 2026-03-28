@@ -43,9 +43,7 @@ from crossformer.utils.train_utils import Timer, TrainState
 from crossformer.utils.tree.core import flat
 import wandb
 
-
-from crossformer.rtc import RTC
-
+from crossformer.model.components.heads.xflow_rtc import rtc_predict_action
 
 # -- config -------------------------------------------------------------------
 
@@ -409,9 +407,6 @@ def main(cfg: Config):
     )  # (B, W, max_h, max_a)
 
 
-
-
-
     # Compute MSE on valid region
     q_mask = build_query_mask(chunk_steps, dof_ids)
     pred_flat = pred.reshape(pred.shape[0], pred.shape[1], -1)
@@ -439,6 +434,51 @@ def main(cfg: Config):
         },
         step=cfg.steps,
     )
+
+
+    # -- RTC demo -------------------------------------------------------------
+    print(Rule("rtc_predict_action: guided denoise"))
+
+    # Sahte önceki chunk olarak mevcut actions'ı kullan
+    d_rtc = 4   # inference delay (adım cinsinden)
+    s_rtc = 8   # execution horizon — d <= s <= max_h - d
+
+    rtc_pred = rtc_predict_action(
+        bound=bound,
+        transformer_outputs=transformer_outputs,
+        rng=pred_rng,
+        dof_ids=dof_ids,
+        chunk_steps=chunk_steps,
+        a_prev=actions,          # (B, W, max_h, max_a) — önceki chunk
+        d=d_rtc,
+        s=s_rtc,
+        beta=5.0,
+        guidance_tokens=guide_tokens,
+    )  # (B, W, max_h, max_a)
+
+    rtc_pred_flat = rtc_pred.reshape(rtc_pred.shape[0], rtc_pred.shape[1], -1)
+    rtc_sq_err = (rtc_pred_flat - tgt_flat) ** 2 * mask
+    rtc_mse = rtc_sq_err.sum() / mask.sum()
+
+    rtc_valid = rtc_pred[0, 0, :max_h, :n_valid]
+    print(f"\n  rtc pred shape: {rtc_pred.shape}  valid DOFs: {n_valid}")
+    print(f"  rtc mse (valid): {float(rtc_mse):.4f}")
+    print(f"  rtc pred range:  [{float(rtc_valid.min()):.3f}, {float(rtc_valid.max()):.3f}]")
+    cfg.wandb.log(
+        {
+            "rtc_predict_action": {
+                "mse": float(rtc_mse),
+                "pred_min": float(rtc_valid.min()),
+                "pred_max": float(rtc_valid.max()),
+            }
+        },
+        step=cfg.steps,
+    )
+
+
+
+
+
 
     print("\n[bold green]done.[/]")
     run.finish()
